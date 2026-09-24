@@ -774,9 +774,9 @@ impl winit::application::ApplicationHandler<CrossEvent> for AppState {
                     // winit delivers ordinary text in KeyboardInput, separately
                     // from IME commits. Only unconsumed text reaches the editor.
                     if propagate && let Some(text) = text_input {
-                        if let Some(handler) = window.0.state.input_handler.borrow_mut().as_mut() {
+                        window.with_input_handler(|handler| {
                             handler.replace_text_in_range(None, &text);
-                        }
+                        });
                     }
                 }
             }
@@ -1182,11 +1182,7 @@ fn dispatch_input(window: &CrossWindow, event: PlatformInput) {
 }
 
 fn handle_ime(window: &CrossWindow, ime: winit::event::Ime) {
-    let mut input_handler = window.0.state.input_handler.borrow_mut();
-    let Some(handler) = input_handler.as_mut() else {
-        return;
-    };
-    match ime {
+    window.with_input_handler(|handler| match ime {
         winit::event::Ime::Enabled => {}
         winit::event::Ime::Preedit(text, cursor) => {
             if text.is_empty() {
@@ -1205,7 +1201,7 @@ fn handle_ime(window: &CrossWindow, ime: winit::event::Ime) {
         winit::event::Ime::Disabled => {
             handler.unmark_text();
         }
-    }
+    });
 }
 
 fn byte_offset_to_utf16(text: &str, byte: usize) -> usize {
