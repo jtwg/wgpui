@@ -1311,6 +1311,9 @@ pub struct WgpuRenderer {
     // Resizing preserves SurfaceId but replaces both texture views.
     surface_bind_groups:
         Mutex<HashMap<(crate::platform::surface_registry::SurfaceId, u64), SurfaceBinding>>,
+
+    // Set when configuring the surface failed; retried before the next draw.
+    configure_pending: std::sync::atomic::AtomicBool,
 }
 
 /// A surface's own params buffer, and its bind groups for front index 0 and 1.
@@ -1413,9 +1416,6 @@ impl WgpuRenderer {
         let pipelines =
             WgpuPipelines::new(context.as_ref(), &surface_configuration, path_sample_count);
 
-        // Configure the surface for presentation before the first draw call.
-        surface.configure(&context.device, &surface_configuration);
-
         let mut renderer = Self {
             context: context.clone(),
             surface,
@@ -1428,12 +1428,37 @@ impl WgpuRenderer {
             path_intermediate_texture: None,
             path_intermediate_view: None,
             surface_bind_groups: Mutex::new(HashMap::new()),
+            configure_pending: std::sync::atomic::AtomicBool::new(false),
         };
+        // Configure the surface for presentation before the first draw call.
+        renderer.configure_surface();
         renderer.ensure_path_intermediate();
         Ok(renderer)
     }
 
+    /// Configure the surface, keeping a failure for a retry rather than
+    /// panicking on it. Returns whether it is configured.
+    fn configure_surface(&self) -> bool {
+        let scope = self.context.device.push_error_scope(wgpu::ErrorFilter::Validation);
+        self.surface
+            .configure(&self.context.device, &self.surface_configuration);
+        let error = pollster::block_on(scope.pop());
+        if let Some(error) = &error {
+            log::warn!("surface configure failed, retrying next frame: {error}");
+        }
+        self.configure_pending
+            .store(error.is_some(), std::sync::atomic::Ordering::Relaxed);
+        error.is_none()
+    }
+
     pub fn draw(&self, scene: &Scene) {
+        if self
+            .configure_pending
+            .load(std::sync::atomic::Ordering::Relaxed)
+            && !self.configure_surface()
+        {
+            return;
+        }
         let mut command_encoder =
             self.context
                 .device
@@ -1898,8 +1923,7 @@ impl WgpuRenderer {
     pub fn update_drawable_size(&mut self, size: geometry::Size<DevicePixels>) {
         self.surface_configuration.width = size.width.0 as u32;
         self.surface_configuration.height = size.height.0 as u32;
-        self.surface
-            .configure(&self.context.device, &self.surface_configuration);
+        self.configure_surface();
         self.ensure_path_intermediate();
     }
 
@@ -2163,8 +2187,7 @@ impl WgpuRenderer {
             // wgpu pick a mode the surface actually supports.
             wgpu::CompositeAlphaMode::Inherit
         };
-        self.surface
-            .configure(&self.context.device, &self.surface_configuration);
+        self.configure_surface();
     }
 
     #[allow(dead_code)]
